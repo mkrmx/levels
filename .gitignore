@@ -1,0 +1,18 @@
+# Credenciales de ESPHome
+secrets.yaml
+firmware/secrets.yaml
+
+# Archivos generados por ESPHome
+.esphome/
+**/.esphome/
+
+# KiCad: respaldos y archivos temporales
+*-backups/
+*.kicad_prl
+*.lck
+fp-info-cache
+_autosave-*
+
+# Sistema
+.DS_Store
+Thumbs.db

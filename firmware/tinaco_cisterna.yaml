@@ -1,0 +1,179 @@
+# LEVELS — Nivel de tinaco y cisterna con XIAO ESP32C3 + 2x JSN-SR04T + OLED 128x32
+# Versión de DOS sensores. La de un sensor es tinaco.yaml (archivo aparte).
+# Conexiones (XIAO ESP32C3, PCB de planta baja con todo soldado):
+#   Alimentación: cargador de 5 V (>= 1 A) al USB-C del XIAO (única entrada, sin diodo).
+#   TINACO (UTP ~15 m, J1)
+#     5V   -> pin 5V del XIAO (+ C1 220 µF y C2 100 nF a GND)
+#     GND  -> GND común
+#     Trig -> R5 100 Ω -> D2 (GPIO4)
+#     Echo -> divisor: Echo --R1 1k--+--> D3 (GPIO5)
+#                                    |
+#                                  R2 2k -> GND
+#   CISTERNA (UTP ~4 m, J2) — mismo divisor 1k/2k (no depende del largo del cable)
+#     5V   -> 5V del XIAO (+ C3 220 µF y C4 100 nF, opcionales)
+#     GND  -> GND común
+#     Trig -> R6 100 Ω -> D1 (GPIO3)
+#     Echo -> divisor: Echo --R3 1k--+--> D10 (GPIO10)
+#                                    |
+#                                  R4 2k -> GND
+#   OLED SDA -> D4 (GPIO6), OLED SCL -> D5 (GPIO7), VCC -> 3V3, GND -> GND común
+#   NO usar D0 (GPIO2), D8 (GPIO8), D9 (GPIO9) para Echo: son pines de arranque.
+# Ambos sensores en modo 1 (pad de modo R27 / "mode" sin resistencia).
+
+substitutions:
+  # --- TINACO: 1.40 m de profundidad, agua llena a 1.20 m (20 cm bajo la tapa).
+  # El sensor va elevado ~15 cm sobre la tapa para librar la zona ciega (~25 cm).
+  dist_lleno: "0.35"    # m: sensor -> agua con el tinaco LLENO (0.20 + 0.15). Mídela.
+  dist_vacio: "1.55"    # m: sensor -> SALIDA del tinaco (multiconector), no al fondo.
+  capacidad_l: "1100"   # litros ÚTILES entre dist_lleno y dist_vacio:
+                        #    pi * (diametro_interior / 2)^2 * (dist_vacio - dist_lleno) * 1000
+
+  # --- CISTERNA: ~1.20 m de altura, agua llena a 1.00 m (20 cm bajo la tapa), 1100 L nominales.
+  # Sensor elevado ~15 cm sobre la tapa (zona ciega).
+  cis_lleno: "0.35"     # m: sensor -> agua con la cisterna LLENA (0.20 + 0.15). Mídela.
+  cis_vacio: "1.35"     # m: sensor -> nivel de SUCCIÓN de la bomba (pichancha), no al fondo:
+                        #    cis_lleno + (1.00 - altura de la pichancha sobre el fondo).
+  cis_capacidad_l: "920" # litros ÚTILES entre cis_lleno y cis_vacio. Valor provisional:
+                        #    recalcula con el diámetro interior real (guía, paso 3.5).
+
+esphome:
+  name: tinaco          # mismo nombre que la versión de un sensor: OTA/Home Assistant lo siguen encontrando
+  friendly_name: Tinaco y cisterna
+
+esp32:
+  board: seeed_xiao_esp32c3
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Tinaco Fallback"
+
+captive_portal:
+
+i2c:
+  sda: GPIO6
+  scl: GPIO7
+
+sensor:
+  # ===================== TINACO =====================
+  - platform: ultrasonic
+    trigger_pin: GPIO4
+    echo_pin: GPIO5
+    name: "Tinaco distancia"
+    id: distancia
+    update_interval: 2s
+    timeout: 4m
+    pulse_time: 20us
+    filters:
+      - filter_out: nan
+      - median:            # descarta rebotes en paredes / gotas de condensación
+          window_size: 9
+          send_every: 5
+          send_first_at: 3
+
+  - platform: template
+    name: "Tinaco nivel"
+    id: nivel
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    update_interval: 10s
+    lambda: |-
+      float d = id(distancia).state;
+      if (isnan(d)) return NAN;
+      float p = (${dist_vacio} - d) / (${dist_vacio} - ${dist_lleno}) * 100.0f;
+      return std::min(100.0f, std::max(0.0f, p));
+
+  - platform: template
+    name: "Tinaco litros"
+    id: litros
+    unit_of_measurement: "L"
+    accuracy_decimals: 0
+    update_interval: 10s
+    lambda: |-
+      if (isnan(id(nivel).state)) return NAN;
+      return id(nivel).state * ${capacidad_l} / 100.0f;
+
+  # ===================== CISTERNA =====================
+  - platform: ultrasonic
+    trigger_pin: GPIO3
+    echo_pin: GPIO10
+    name: "Cisterna distancia"
+    id: dist_cisterna
+    update_interval: 3s    # desfasado del tinaco
+    timeout: 4m
+    pulse_time: 20us
+    filters:
+      - filter_out: nan
+      - median:
+          window_size: 9
+          send_every: 5
+          send_first_at: 3
+
+  - platform: template
+    name: "Cisterna nivel"
+    id: nivel_cisterna
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    update_interval: 10s
+    lambda: |-
+      float d = id(dist_cisterna).state;
+      if (isnan(d)) return NAN;
+      float p = (${cis_vacio} - d) / (${cis_vacio} - ${cis_lleno}) * 100.0f;
+      return std::min(100.0f, std::max(0.0f, p));
+
+  - platform: template
+    name: "Cisterna litros"
+    id: litros_cisterna
+    unit_of_measurement: "L"
+    accuracy_decimals: 0
+    update_interval: 10s
+    lambda: |-
+      if (isnan(id(nivel_cisterna).state)) return NAN;
+      return id(nivel_cisterna).state * ${cis_capacidad_l} / 100.0f;
+
+  - platform: wifi_signal
+    name: "Señal WiFi"
+    update_interval: 60s
+
+button:
+  - platform: restart
+    name: "Reiniciar"
+
+font:
+  - file: "gfonts://Roboto@700"
+    id: f_med
+    size: 14
+
+display:
+  - platform: ssd1306_i2c
+    model: "SSD1306 128x32"
+    address: 0x3C
+    update_interval: 2s
+    # Dos renglones de 16 px: arriba tinaco (T), abajo cisterna (C).
+    lambda: |-
+      auto fila = [&](int y, const char *etiqueta, float n) {
+        if (isnan(n)) {
+          it.printf(0, y, id(f_med), "%s  --", etiqueta);
+          it.rectangle(66, y + 2, 62, 12);
+          return;
+        }
+        it.printf(0, y, id(f_med), "%s %3.0f%%", etiqueta, n);
+        it.rectangle(66, y + 2, 62, 12);
+        int w = (int)(n * 0.60f);
+        if (w > 0) it.filled_rectangle(67, y + 3, w, 10);
+      };
+      fila(0,  "T", id(nivel).state);
+      fila(16, "C", id(nivel_cisterna).state);
